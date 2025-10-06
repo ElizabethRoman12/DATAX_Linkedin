@@ -135,15 +135,27 @@ def transformar_xls_a_csv():
                 es_binario = f.read(8).startswith(b"\xD0\xCF\x11\xE0")
 
             if es_binario:
-                excel = win32.Dispatch("Excel.Application")
-                excel.DisplayAlerts = False
-                wb = excel.Workbooks.Open(os.path.abspath(file))
-                temp_xlsx = os.path.join(tempfile.gettempdir(), nombre.replace(".xls", ".xlsx"))
-                wb.SaveAs(temp_xlsx, FileFormat=51)
-                wb.Close()
-                excel.Quit()
-                file_to_read = temp_xlsx
-                print(f" * {nombre} convertido temporalmente → {temp_xlsx}")
+                try:
+                    excel = win32.gencache.EnsureDispatch("Excel.Application")
+                    excel.Visible = False
+                    excel.DisplayAlerts = False
+
+                    wb = excel.Workbooks.Open(os.path.abspath(file))
+                    temp_xlsx = os.path.join(tempfile.gettempdir(), nombre.replace(".xls", ".xlsx"))
+
+                    # eliminar si ya existe
+                    if os.path.exists(temp_xlsx):
+                        os.remove(temp_xlsx)
+
+                    wb.SaveAs(temp_xlsx, FileFormat=51)
+                    wb.Close(SaveChanges=False)
+                    excel.Quit()
+                    file_to_read = temp_xlsx
+                    print(f" * {nombre} convertido temporalmente → {temp_xlsx}")
+                except Exception:
+                    print(" No se pudo usar Excel COM, se leerá directo con pandas/xlrd...")
+                    es_binario = False
+
             else:
                 file_to_read = file
 
@@ -161,7 +173,6 @@ def transformar_xls_a_csv():
                     df.dropna(how="all", inplace=True)
                     df.to_csv(os.path.join(CLEAN_DIR, salida), index=False)
                     print(f" * {nombre} → {salida}")
-
             else:
                 df = pd.read_excel(xls, sheet_name=0)
                 df.dropna(how="all", inplace=True)
@@ -180,12 +191,78 @@ def transformar_xls_a_csv():
             print(f"   > {o}")
     print(" * Transformación completada.\n")
 
+
 # Funciones auxiliares
 def load_csv(path): return pd.read_csv(path)
 def safe_get(row, col): return row[col] if col in row and pd.notna(row[col]) else None
 def safe_parse_date(value):
     try: return pd.to_datetime(value, errors="coerce", dayfirst=False).date()
     except: return None
+
+
+# Segmentación Segudires-Visitantes
+def get_raw_file(pattern):
+    files = glob.glob(os.path.join(EXPORTS_DIR, pattern))
+    return files[0] if files else None
+
+
+def ingest_segmentacion(file, tipo_entidad):
+    try:
+        # Intentar leer con pandas normalmente
+        try:
+            xls = pd.ExcelFile(file)
+        except Exception as e:
+            print(f" X xlrd no pudo leer {os.path.basename(file)}, convirtiendo con Excel COM...")
+
+            try:
+                pythoncom.CoInitialize()
+                excel = win32.Dispatch("Excel.Application")
+                excel.Visible = False
+                excel.DisplayAlerts = False 
+
+                wb = excel.Workbooks.Open(os.path.abspath(file))
+
+                # Crear un archivo temporal único para evitar conflictos
+                temp_xlsx = os.path.join(
+                    tempfile.gettempdir(),
+                    f"{os.path.basename(file).replace('.xls', '')}_{tipo_entidad}.xlsx"
+                )
+
+                # Si existe lo elimina
+                if os.path.exists(temp_xlsx):
+                    os.remove(temp_xlsx)
+
+                wb.SaveAs(temp_xlsx, FileFormat=51)  # Guardar como .xlsx
+                wb.Close(SaveChanges=False)
+                excel.Quit()
+                xls = pd.ExcelFile(temp_xlsx)
+                print(f"* Archivo convertido temporalmente → {temp_xlsx}")
+
+            except Exception as e2:
+                print(f"❌ Error al convertir {file}: {e2}")
+                return
+
+        # Leer las hojas de segmentación
+        for sheet in xls.sheet_names:
+            if sheet.lower() in ["función laboral", "sector", "tamaño de la empresa", "ubicación", "nivel de responsabilidad"]:
+                df = pd.read_excel(xls, sheet_name=sheet)
+                df.dropna(how="all", inplace=True)
+                for _, row in df.iterrows():
+                    cur.execute("""
+                        INSERT INTO segmentacion_pagina 
+                            (pagina_id, plataforma, fecha, tipo_entidad, categoria, subcategoria, valor)
+                        VALUES (%s,%s,%s,%s,%s,%s,%s)
+                        ON CONFLICT ON CONSTRAINT uq_segmentacion DO UPDATE SET
+                            valor = EXCLUDED.valor
+                    """, (
+                        PAGE_ID, "linkedin", date.today(),
+                        tipo_entidad, sheet, safe_get(row, df.columns[0]), safe_get(row, df.columns[1])
+                    ))
+        print(f"- Segmentación cargada desde {file}")
+
+    except Exception as e:
+        print(f"X Error al procesar segmentación {file}: {e}")
+
 
 # Insert extra (métricas)
 def insert_extra(entidad_id, tipo_entidad, plataforma, fecha, row, columnas_principales=[], publicacion_id=None):
@@ -207,6 +284,7 @@ def insert_extra(entidad_id, tipo_entidad, plataforma, fecha, row, columnas_prin
             valor_num, valor_texto, publicacion_id,
             PAGE_ID if publicacion_id is None else None
         ))
+
 
 # Ingesta Contenido_Publicaciones
 def ingest_publicaciones(path=f"{CLEAN_DIR}/Contenido_Publicaciones.csv"):
@@ -234,7 +312,7 @@ def ingest_publicaciones(path=f"{CLEAN_DIR}/Contenido_Publicaciones.csv"):
             ON CONFLICT ON CONSTRAINT uq_metricas_publicacion_fecha DO UPDATE SET
                 impresiones = EXCLUDED.impresiones,
                 comentarios = EXCLUDED.comentarios,
-                compartidos = EXCLUDED.compartidos,
+                compartidos = EXCLUDED.comentarios,
                 clics_enlace = EXCLUDED.clics_enlace,
                 ctr = EXCLUDED.ctr,
                 total_reacciones = EXCLUDED.total_reacciones
@@ -248,6 +326,7 @@ def ingest_publicaciones(path=f"{CLEAN_DIR}/Contenido_Publicaciones.csv"):
                      ["Título de la publicación", "Tipo de publicación", "Enlace de la publicación", "Fecha de creación"],
                      publicacion_id=pub_id)
     print(" *Publicaciones insertadas correctamente\n")
+
 
 # Ingesta Contenido_Indicadores
 def ingest_indicadores(path=f"{CLEAN_DIR}/Contenido_Indicadores.csv"):
@@ -277,6 +356,7 @@ def ingest_indicadores(path=f"{CLEAN_DIR}/Contenido_Indicadores.csv"):
         insert_extra(PAGE_ID, "indicadores", "linkedin", fecha, row, ["Fecha"])
     print(" *Indicadores cargados correctamente.\n")
 
+
 # Ingesta Seguidores
 def ingest_seguidores(path=f"{CLEAN_DIR}/Seguidores.csv"):
     print(" Ingestando seguidores...")
@@ -289,7 +369,12 @@ def ingest_seguidores(path=f"{CLEAN_DIR}/Seguidores.csv"):
             ON CONFLICT ON CONSTRAINT uq_pagina_semana DO UPDATE SET total_seguidores = EXCLUDED.total_seguidores
         """, (PAGE_ID, "linkedin", fecha, safe_get(row, "Total de seguidores")))
         insert_extra(PAGE_ID, "seguidores", "linkedin", fecha, row, ["Fecha", "Total de seguidores"])
+
+    raw_file = get_raw_file("Seguidores*.xls")
+    if raw_file:
+        ingest_segmentacion(raw_file, "seguidores")
     print(" *Seguidores actualizados correctamente\n")
+
 
 # Ingesta Visitantes
 def ingest_visitantes(path=f"{CLEAN_DIR}/Visitantes.csv"):
@@ -309,7 +394,12 @@ def ingest_visitantes(path=f"{CLEAN_DIR}/Visitantes.csv"):
             safe_get(row, "Visualizaciones de la página en total (total)")
         ))
         insert_extra(PAGE_ID, "visitantes", "linkedin", fecha, row, ["Fecha"])
+
+    raw_file = get_raw_file("Visitantes*.xls")
+    if raw_file:
+        ingest_segmentacion(raw_file, "visitantes")
     print(" *Visitantes cargados correctamente.\n")
+
 
 # Main
 def main():
@@ -323,6 +413,7 @@ def main():
     cur.close()
     conn.close()
     print(" Ingesta completada con éxito")
+
 
 if __name__ == "__main__":
     main()
