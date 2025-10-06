@@ -1,0 +1,12 @@
+1. Activar el entorno
+      .\venv\Scripts\activate   
+2. descargar las dependendecias 
+       pip install -r dependencia.txt
+3. Descargar Rango de fechas que se desee ingestar 
+      python linkedin.py 2025-09-01 2025-10-03 all (Descarga Contenido,Visitantes,Seguidores)
+      python linkedin.py 2025-09-01 2025-10-03 Contenido (solo descarga contenido)
+      python linkedin.py 2025-09-01 2025-10-03 Visitantes (solo descarga visitantes)
+      python linkedin.py 2025-09-01 2025-10-03 Seguidores (solo descarga seguidores)
+Los archivos descargados quedaran en : linkedin_exports/
+4. Realizar la ingesta
+      python li_ingest_csv.py

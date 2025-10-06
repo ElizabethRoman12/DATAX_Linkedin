@@ -1,0 +1,5 @@
+psycopg2-binary
+python-dotenv
+pandas
+pip install pywin32
+pip install xlrd==1.2.0
