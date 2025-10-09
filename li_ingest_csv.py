@@ -193,12 +193,15 @@ def transformar_xls_a_csv():
 
 
 # Funciones auxiliares
-def load_csv(path): return pd.read_csv(path)
+def load_csv(path):
+    df = pd.read_csv(path)
+    # limpieza de encabezados: elimina espacios invisibles, saltos de línea o NBSP
+    df.columns = df.columns.str.replace(r'\s+', ' ', regex=True).str.strip()
+    return df
 def safe_get(row, col): return row[col] if col in row and pd.notna(row[col]) else None
 def safe_parse_date(value):
     try: return pd.to_datetime(value, errors="coerce", dayfirst=False).date()
     except: return None
-
 
 # Segmentación Segudires-Visitantes
 def get_raw_file(pattern):
@@ -290,42 +293,145 @@ def insert_extra(entidad_id, tipo_entidad, plataforma, fecha, row, columnas_prin
 def ingest_publicaciones(path=f"{CLEAN_DIR}/Contenido_Publicaciones.csv"):
     print(" Ingestando publicaciones...")
     df = load_csv(path)
+
     for _, row in df.iterrows():
         pub_id = generar_pub_id(row)
         fecha_pub = safe_parse_date(row.get("Fecha de creación")) or date.today()
+
+        # Detectar nombre de campaña
+        def get_nombre_campania(row):
+            posibles = [
+                "Nombre de la campaña",
+                "nombre de la campaña",
+                "Nombre de la Campaña",
+                "Campaign name",
+                "Nombre de la campaña ", 
+                "Nombre de la campaña "   
+            ]
+            for col in row.index:
+                if any(col.strip().lower() == p.strip().lower() for p in posibles):
+                    valor = row[col]
+                    if pd.notna(valor) and str(valor).strip() != "":
+                        return str(valor).strip()
+            return None
+
+        nombre_campania = get_nombre_campania(row)
+        campania_id = None  
+
+        # Extraer fechas si existen
+        fecha_inicio_campania = None
+        fecha_fin_campania = None
+        for col in row.index:
+            if "inicio" in col.lower() and "campaña" in col.lower():
+                fecha_inicio_campania = safe_parse_date(row[col])
+            elif "final" in col.lower() and "campaña" in col.lower():
+                fecha_fin_campania = safe_parse_date(row[col])
+
+        # Forzar conversión por formato tipo MM/DD/YYYY)
+        def fix_date_format(fecha_raw):
+            if not fecha_raw or pd.isna(fecha_raw):
+                return None
+            try:
+                return pd.to_datetime(fecha_raw, errors="coerce", dayfirst=False).date()
+            except:
+                return None
+
+        fecha_inicio_campania = fix_date_format(fecha_inicio_campania or row.get("Fecha de inicio de campaña"))
+        fecha_fin_campania = fix_date_format(fecha_fin_campania or row.get("Fecha de finalización de campaña"))
+
+        # Normalizar y detectar campaña real (solo si no es Orgánico o Total)
+        nombre_campania = re.sub(r'\s+', ' ', (nombre_campania or "").strip())
+        if nombre_campania and nombre_campania.lower() not in ["orgánico", "total"]:
+            campania_id = hashlib.sha1(nombre_campania.encode("utf-8")).hexdigest()
+
+            cur.execute("""
+                INSERT INTO campanias (
+                    campania_id, plataforma, nombre_campania, fecha_inicio, fecha_fin, estado
+                )
+                VALUES (%s, %s, %s, %s, %s, %s)
+                ON CONFLICT (campania_id) DO UPDATE
+                    SET nombre_campania = EXCLUDED.nombre_campania,
+                        fecha_inicio = COALESCE(EXCLUDED.fecha_inicio, campanias.fecha_inicio),
+                        fecha_fin = COALESCE(EXCLUDED.fecha_fin, campanias.fecha_fin),
+                        estado = EXCLUDED.estado
+            """, (
+                campania_id,
+                "linkedin",
+                nombre_campania,
+                fecha_inicio_campania,
+                fecha_fin_campania,
+                "activa"
+            ))
+        else:
+            campania_id = None  # para publicaciones sin campaña o de tipo Orgánico
+
+        # Insertar publicación y asociar campaña si existe
         cur.execute("""
-            INSERT INTO publicaciones (publicacion_id, pagina_id, plataforma, fecha_hora_publicacion,
-                                       texto_publicacion, formato, url_publicacion, fecha_descarga)
-            VALUES (%s,%s,%s,%s,%s,%s,%s,%s)
-            ON CONFLICT (publicacion_id) DO NOTHING
+            INSERT INTO publicaciones (
+                publicacion_id, pagina_id, plataforma, fecha_hora_publicacion,
+                texto_publicacion, formato, url_publicacion, fecha_descarga, campania_id
+            )
+            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)
+            ON CONFLICT (publicacion_id) DO UPDATE
+                SET campania_id = COALESCE(EXCLUDED.campania_id, publicaciones.campania_id)
         """, (
             pub_id, PAGE_ID, "linkedin", fecha_pub,
             safe_get(row, "Título de la publicación"),
             safe_get(row, "Tipo de publicación"),
             safe_get(row, "Enlace de la publicación"),
-            date.today()
+            date.today(),
+            campania_id
         ))
+
+        #Insertar métricas principales
         cur.execute("""
-            INSERT INTO metricas_publicaciones_diarias (publicacion_id, pagina_id, plataforma, fecha_descarga,
-                                                        impresiones, comentarios, compartidos, clics_enlace, ctr, total_reacciones)
+            INSERT INTO metricas_publicaciones_diarias (
+                publicacion_id, pagina_id, plataforma, fecha_descarga,
+                impresiones, comentarios, compartidos, clics_enlace, ctr, total_reacciones
+            )
             VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
-            ON CONFLICT ON CONSTRAINT uq_metricas_publicacion_fecha DO UPDATE SET
-                impresiones = EXCLUDED.impresiones,
-                comentarios = EXCLUDED.comentarios,
-                compartidos = EXCLUDED.comentarios,
-                clics_enlace = EXCLUDED.clics_enlace,
-                ctr = EXCLUDED.ctr,
-                total_reacciones = EXCLUDED.total_reacciones
+            ON CONFLICT ON CONSTRAINT uq_metricas_publicacion_fecha DO UPDATE
+                SET impresiones = EXCLUDED.impresiones,
+                    comentarios = EXCLUDED.comentarios,
+                    compartidos = EXCLUDED.compartidos,
+                    clics_enlace = EXCLUDED.clics_enlace,
+                    ctr = EXCLUDED.ctr,
+                    total_reacciones = EXCLUDED.total_reacciones
         """, (
             pub_id, PAGE_ID, "linkedin", date.today(),
             safe_get(row, "Impresiones"), safe_get(row, "Comentarios"),
             safe_get(row, "Veces compartido"), safe_get(row, "Clics"),
             safe_get(row, "CTR"), safe_get(row, "Reacciones")
         ))
-        insert_extra(pub_id, "publicacion", "linkedin", fecha_pub, row,
-                     ["Título de la publicación", "Tipo de publicación", "Enlace de la publicación", "Fecha de creación"],
-                     publicacion_id=pub_id)
+
+        # Insertar métricas extra
+        insert_extra(
+            pub_id, "publicacion", "linkedin", fecha_pub, row,
+            [
+                "Título de la publicación", "Tipo de publicación",
+                "Enlace de la publicación", "Fecha de creación",
+                "Nombre de la campaña"
+            ],
+            publicacion_id=pub_id
+        )
+
     print(" *Publicaciones insertadas correctamente\n")
+
+       # Actualizar estado de las campañas según la fecha actual
+    print(" Verificando estado de campañas (activa / finalizada)...")
+    cur.execute("""
+        UPDATE campanias
+        SET estado = CASE
+            WHEN fecha_fin IS NOT NULL AND fecha_fin < CURRENT_DATE THEN 'finalizada'
+            WHEN fecha_inicio IS NOT NULL AND fecha_inicio > CURRENT_DATE THEN 'programada'
+            ELSE 'activa'
+        END
+        WHERE plataforma = 'linkedin';
+    """)
+    conn.commit()
+    print(" Estados de campañas actualizados según fechas.\n")
+
+
 
 
 # Ingesta Contenido_Indicadores
