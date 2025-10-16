@@ -481,7 +481,6 @@ def ingest_seguidores(path=f"{CLEAN_DIR}/Seguidores.csv"):
         ingest_segmentacion(raw_file, "seguidores")
     print(" *Seguidores actualizados correctamente\n")
 
-
 # Ingesta Visitantes
 def ingest_visitantes(path=f"{CLEAN_DIR}/Visitantes.csv"):
     print(" Ingestando visitantes...")
@@ -507,7 +506,6 @@ def ingest_visitantes(path=f"{CLEAN_DIR}/Visitantes.csv"):
     print(" *Visitantes cargados correctamente.\n")
 
 
-# Main
 def main():
     limpiar_rangos_previos()
     transformar_xls_a_csv()
