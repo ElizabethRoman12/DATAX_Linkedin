@@ -1,4 +1,8 @@
 import os
+import os
+from playwright.sync_api import sync_playwright
+
+import os
 import pandas as pd
 import psycopg2
 from datetime import date
@@ -7,6 +11,148 @@ import glob
 import hashlib
 from datetime import datetime
 import re, tempfile, pythoncom, win32com.client as win32
+
+
+import os
+import sys
+from datetime import datetime
+from playwright.sync_api import sync_playwright
+from login import get_context
+
+SESSIONS = {
+    "facebook": {
+        "url": "https://www.facebook.com/login",
+        "file": "fb_session.json"
+    },
+    "instagram": {
+        "url": "https://www.instagram.com/?flo=true",
+        "file": "ig_session.json"
+    },
+    "tiktok": {
+        "url": "https://www.tiktok.com/login/phone-or-email/email",
+        "file": "tiktok_session.json"
+    },
+    "linkedin": {
+        "url": "https://www.linkedin.com/login",
+        "file": "linkedin_session.json"
+    }
+}
+
+def get_context(playwright, platform: str):
+    """
+    Devuelve un browser, context y page logueados en la plataforma indicada.
+    - platform: "facebook", "instagram", "tiktok", "linkedin"
+    """
+    if platform not in SESSIONS:
+        raise ValueError(f"Plataforma no soportada: {platform}")
+
+    session_info = SESSIONS[platform]
+    session_file = session_info["file"]
+    url = session_info["url"]
+
+    browser = playwright.chromium.launch(headless=False)
+
+    if not os.path.exists(session_file):
+        # Primera vez: login manual
+        context = browser.new_context()
+        page = context.new_page()
+        page.goto(url)
+
+        print(f"Inicia sesión manualmente en {platform}")
+        page.wait_for_timeout(120000)
+
+        context.storage_state(path=session_file)
+        print(f"Sesión de {platform} guardada en {session_file}")
+    else:
+        context = browser.new_context(storage_state=session_file)
+        page = context.new_page()
+
+        if platform == "linkedin":
+            # Ir directo al panel de DATAX
+            page.goto("https://www.linkedin.com/company/1283307/admin/analytics/updates/")
+        else:
+            page.goto(url.replace("/login", ""))
+
+        print(f"Sesión de {platform} cargada desde {session_file}")
+
+    return browser, context, page
+
+# DESCARGA AUTOMATIZADA
+OUTPUT_DIR = "linkedin_exports"
+
+if len(sys.argv) < 4:
+    print("Uso: python linkedin.py YYYY-MM-DD YYYY-MM-DD [Contenido|Visitantes|Seguidores|all]")
+    sys.exit(1)
+start_date_arg = sys.argv[1]
+end_date_arg = sys.argv[2]
+tabs_arg = sys.argv[3]
+# Formato DD/MM/YYYY
+start_date = datetime.strptime(start_date_arg, "%Y-%m-%d").strftime("%d/%m/%Y")
+end_date = datetime.strptime(end_date_arg, "%Y-%m-%d").strftime("%d/%m/%Y")
+# Pestañas según argumento
+if tabs_arg.lower() == "all":
+    tabs = ["Contenido", "Visitantes", "Seguidores"]
+else:
+    tabs = [tabs_arg]
+# Loguin + Descarga 
+with sync_playwright() as p:
+    browser, context, page = get_context(p, "linkedin")
+    #page.goto("https://www.linkedin.com/company/1283307/admin/analytics/updates/")
+    
+    #Descarga de csvs por pestaña
+    def download_tab(page, tab_text: str, start_date: str, end_date: str):
+        print(f"Descargando {tab_text}...")
+        try:
+            page.click(f"[data-test-org-menu-item__title]:has-text('{tab_text}')")
+        except:
+            page.click(f"text={tab_text}")
+        page.wait_for_timeout(2000)  # simular cambio de pestaña
+        # Esperar Primer botón "Exportar"
+        page.wait_for_selector("button:has([data-test-icon='download-small'])", timeout=10000)
+        # Seleccionar fechas personalizadas
+        page.click("button[aria-label^='Periodo:']")
+        page.wait_for_selector("div.member-analytics-addon-daterange-picker__dropdown-content-redesign")
+        page.click("div.member-analytics-addon-daterange-picker__dropdown-content-redesign >> text=Personalizado")
+        page.wait_for_timeout(2000)
+        #contenedor principal del datepicker
+        picker = page.locator("div.member-analytics-addon-daterange-picker__dropdown-content-redesign")
+        # Buscar inputs de fecha dentro del picker
+        start_input = picker.locator("input").nth(0)
+        end_input = picker.locator("input").nth(1)
+        # limpiar y escribir fechas
+        start_input.fill(start_date)
+        end_input.fill(end_date)
+        #Boton Actualizar
+        picker.locator("button:has-text('Actualizar')").click()
+        page.wait_for_timeout(2000)
+        # verificar error de rango
+        if page.locator("text=Una o más fechas no están disponibles").is_visible():
+            print("Rango erróneo, se usará 'Últimos 90 días'")
+            page.click("div.member-analytics-addon-daterange-picker__dropdown-content-redesign >> text=Últimos 90 días")
+            page.wait_for_timeout(1000)
+        with page.expect_download() as download_info:
+            # click boton1 de exportar
+            page.click("button:has([data-test-icon='download-small'])")
+            # esperar segundo boton de exportar
+            page.wait_for_selector("button.artdeco-button--primary span:has-text('Exportar')", timeout=10000)
+            page.wait_for_timeout(2000)
+            #click segundo boton de exportar
+            page.click("button.artdeco-button--primary span:has-text('Exportar')")
+        download = download_info.value
+        if not os.path.exists(OUTPUT_DIR):
+            os.makedirs(OUTPUT_DIR)
+        # Nombre con rango de fechas
+        file_name = f"{tab_text}_{start_date_arg}_{end_date_arg}.xls"
+        file_path = os.path.join(OUTPUT_DIR, file_name)
+        download.save_as(file_path)
+        print(f"Guardado en {file_path}")
+    #inicia descarga
+    for tab in tabs:
+        download_tab(page, tab, start_date, end_date)
+    input("\nPresiona ENTER para cerrar...")
+    browser.close()
+
+# INGESTA LIKEDIN
 
 # Configuración
 load_dotenv()
@@ -266,15 +412,43 @@ def ingest_segmentacion(file, tipo_entidad):
 
 # Insert extra (métricas)
 def insert_extra(entidad_id, tipo_entidad, plataforma, fecha, row, columnas_principales=[], publicacion_id=None):
-    if fecha is None: fecha = date.today()
+    if fecha is None: 
+        fecha = date.today()
+
+    # 🔹 Excluir solo las métricas principales (ya almacenadas en tablas base)
+    METRICAS_EXCLUIR = {
+        "Impresiones",
+        "Clics",
+        "Impresiones (totales)",
+        "Clics (totales)",
+        "Reacciones (total)",
+        "Comentarios (totales)",
+        "Veces compartido (total)",
+        "Tasa de interacción (total)",
+        "Visitantes únicos en total (total)",
+        "Visualizaciones de la página en total (total)"
+    }
+
     for col, val in row.items():
-        if col in columnas_principales or val is None or str(val).strip() == "": continue
+        if (
+            col in columnas_principales 
+            or col in METRICAS_EXCLUIR 
+            or val is None 
+            or str(val).strip() == ""
+        ):
+            continue
+
         valor_num, valor_texto = None, None
-        try: valor_num = float(str(val).replace(",", "").replace("%", ""))
-        except: valor_texto = str(val)
+        try:
+            valor_num = float(str(val).replace(",", "").replace("%", ""))
+        except:
+            valor_texto = str(val)
+
         cur.execute("""
-            INSERT INTO metricas_extras (entidad_id, tipo_entidad, plataforma, fecha, 
-                                         nombre_metrica, valor, valor_texto, publicacion_id, pagina_id)
+            INSERT INTO metricas_extras (
+                entidad_id, tipo_entidad, plataforma, fecha, 
+                nombre_metrica, valor, valor_texto, publicacion_id, pagina_id
+            )
             VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)
             ON CONFLICT ON CONSTRAINT uq_metricas_extras DO UPDATE SET
                 valor = EXCLUDED.valor,
@@ -335,9 +509,11 @@ def ingest_indicadores(path=f"{CLEAN_DIR}/Contenido_Indicadores.csv"):
     for _, row in df.iterrows():
         fecha = safe_parse_date(row.get("Fecha"))
         cur.execute("""
-            INSERT INTO estadisticas_pagina_diaria (pagina_id, plataforma, fecha, impresiones_totales,
-                                                     clics_totales, reacciones_totales, comentarios_totales,
-                                                     compartidos_totales, tasa_interaccion, fecha_descarga)
+            INSERT INTO estadisticas_pagina_diaria (
+                pagina_id, plataforma, fecha, impresiones_totales,
+                clics_totales, reacciones_totales, comentarios_totales,
+                compartidos_totales, tasa_interaccion, fecha_descarga
+            )
             VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
             ON CONFLICT (pagina_id, fecha) DO UPDATE SET
                 impresiones_totales = EXCLUDED.impresiones_totales,
@@ -348,12 +524,25 @@ def ingest_indicadores(path=f"{CLEAN_DIR}/Contenido_Indicadores.csv"):
                 tasa_interaccion = EXCLUDED.tasa_interaccion
         """, (
             PAGE_ID, "linkedin", fecha,
-            safe_get(row, "Impresiones (totales)"), safe_get(row, "Clics (totales)"),
-            safe_get(row, "Reacciones (total)"), safe_get(row, "Comentarios (totales)"),
-            safe_get(row, "Veces compartido (total)"), safe_get(row, "Tasa de interacción (total)"),
+            safe_get(row, "Impresiones (totales)"),
+            safe_get(row, "Clics (totales)"),
+            safe_get(row, "Reacciones (total)"),
+            safe_get(row, "Comentarios (totales)"),
+            safe_get(row, "Veces compartido (total)"),
+            safe_get(row, "Tasa de interacción (total)"),
             date.today()
         ))
-        insert_extra(PAGE_ID, "indicadores", "linkedin", fecha, row, ["Fecha"])
+
+        # 🔹 Ahora excluye las métricas principales de metricas_extras
+        insert_extra(PAGE_ID, "indicadores", "linkedin", fecha, row, [
+            "Fecha",
+            "Impresiones", "Clics",
+            "Impresiones (totales)", "Clics (totales)",
+            "Reacciones (total)", "Comentarios (totales)",
+            "Veces compartido (total)", "Tasa de interacción (total)",
+            "Visitantes únicos en total (total)",
+            "Visualizaciones de la página en total (total)"
+        ])
     print(" *Indicadores cargados correctamente.\n")
 
 

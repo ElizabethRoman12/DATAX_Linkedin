@@ -25,3 +25,5 @@
 [2025-10-06 12:36:35] Limpieza 2024-10-05 → 2025-10-04 (Contenido_Indicadores.csv)
 [2025-10-06 12:37:07] Limpieza 2024-10-05 → 2025-10-04 (Contenido_Indicadores.csv)
 [2025-10-06 12:41:49] Limpieza 2024-10-05 → 2025-10-04 (Contenido_Indicadores.csv)
+[2025-10-16 12:02:13] Limpieza 2024-10-05 → 2025-10-04 (Contenido_Indicadores.csv)
+[2025-11-12 04:16:49] Limpieza 2024-10-05 → 2025-10-04 (Contenido_Indicadores.csv)
